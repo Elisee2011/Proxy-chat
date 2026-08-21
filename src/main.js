@@ -14,6 +14,7 @@ const state = {
   connected: false,
   players: new Map(),
   messages: [],
+  pendingChats: [],
   keys: new Set(),
   micStream: null,
   peers: new Map(),
@@ -36,7 +37,7 @@ app.innerHTML = `
     <main class="game-shell">
       <section class="world-wrap">
         <canvas id="world" width="1200" height="760"></canvas>
-        <div class="hint">WASD / flèches pour bouger · <b>Entrée</b> pour parler</div>
+        <div class="hint">WASD / flèches pour bouger · <b>Entrée</b> pour envoyer</div>
         <div class="voice-pill" id="voicePill">🎙️ Micro désactivé</div>
       </section>
       <aside class="chat-panel">
@@ -44,7 +45,7 @@ app.innerHTML = `
         <div class="messages" id="messages"></div>
         <form class="composer" id="composer">
           <input id="messageInput" maxlength="180" autocomplete="off" placeholder="Écris aux personnes proches…" />
-          <button aria-label="Envoyer">➤</button>
+          <button type="submit" aria-label="Envoyer">➤</button>
         </form>
         <div class="controls">
           <button class="control" id="micBtn">🎙️ Activer le micro</button>
@@ -79,18 +80,41 @@ function addMessage(message) {
 
 function sendChat() {
   const text = input.value.trim();
-  if (!text || state.socket?.readyState !== WebSocket.OPEN) return;
-  state.socket.send(JSON.stringify({ type:'chat', text }));
+  if (!text) return;
+
+  const message = { type:'chat', text };
+
+  // Affiche immédiatement le message chez l'expéditeur.
+  // Le serveur le renverra aussi aux personnes à proximité.
+  if (state.socket?.readyState === WebSocket.OPEN) {
+    state.socket.send(JSON.stringify(message));
+  } else {
+    // Ne perd pas le message si le serveur est momentanément en reconnexion.
+    state.pendingChats.push(message);
+    addMessage({ name: state.name, text, at: Date.now(), player: { id: state.id, x: state.x, y: state.y } });
+  }
+
   input.value = '';
+  input.focus();
 }
 
-document.querySelector('#composer').addEventListener('submit', e => { e.preventDefault(); sendChat(); });
+document.querySelector('#composer').addEventListener('submit', e => {
+  e.preventDefault();
+  sendChat();
+});
+
+function flushPendingChats() {
+  if (state.socket?.readyState !== WebSocket.OPEN || !state.pendingChats.length) return;
+  for (const message of state.pendingChats) state.socket.send(JSON.stringify(message));
+  state.pendingChats = [];
+}
 
 function connect() {
   try { state.socket = new WebSocket(SERVER_URL); } catch { setStatus(false, 'Hors ligne'); return; }
   state.socket.onopen = () => {
     setStatus(true, 'En ligne');
     state.socket.send(JSON.stringify({type:'join', id:state.id, name:state.name, x:state.x, y:state.y}));
+    flushPendingChats();
   };
   state.socket.onclose = () => {
     setStatus(false, 'Serveur indisponible');
@@ -109,7 +133,9 @@ function connect() {
     if (data.type === 'player:move' && data.player.id !== state.id) state.players.set(data.player.id, data.player);
     if (data.type === 'player:leave') { state.players.delete(data.id); closePeer(data.id); }
     if (data.type === 'chat') {
-      if (data.player && distance(state, data.player) <= CHAT_RADIUS) addMessage(data);
+      // Évite le doublon si le serveur renvoie notre propre message.
+      const isMine = data.player?.id === state.id;
+      if (!isMine && data.player && distance(state, data.player) <= CHAT_RADIUS) addMessage(data);
     }
     if (data.type === 'voice:offer' || data.type === 'voice:answer' || data.type === 'voice:ice') await handleSignal(data);
   };
@@ -126,9 +152,14 @@ function updateNearby() {
 }
 
 window.addEventListener('keydown', e => {
+  // Entrée envoie le message lorsqu'on écrit dans le champ.
+  if (e.key === 'Enter' && document.activeElement === input) {
+    e.preventDefault();
+    sendChat();
+    return;
+  }
   if (['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)) return;
   state.keys.add(e.key.toLowerCase());
-  if (e.key === 'Enter') input.focus();
 });
 window.addEventListener('keyup', e => state.keys.delete(e.key.toLowerCase()));
 
@@ -212,9 +243,6 @@ async function handleSignal(data) {
   try {
     if (data.type === 'voice:offer') {
       await pc.setRemoteDescription(data.offer);
-      if (state.micStream) state.micStream.getTracks().forEach(t => {
-        if (![...pc.getSenders()].some(s => s.track === t)) pc.addTrack(t, state.micStream);
-      });
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       state.socket.send(JSON.stringify({type:'voice:answer',to:data.from,answer}));
@@ -227,7 +255,8 @@ async function handleSignal(data) {
 }
 
 async function startVoicePeer(id) {
-  if (!state.micStream || state.peers.has(id) || distance(state, state.players.get(id)) > VOICE_RADIUS) return;
+  const player = state.players.get(id);
+  if (!state.micStream || !player || state.peers.has(id) || distance(state, player) > VOICE_RADIUS) return;
   const pc = createPeer(id);
   try {
     const offer = await pc.createOffer();
