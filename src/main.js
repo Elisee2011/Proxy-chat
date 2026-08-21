@@ -10,303 +10,65 @@ const ICE_SERVERS = [
 ];
 
 const state = {
-  socket: null,
-  connected: false,
-  players: new Map(),
-  messages: [],
-  pendingChats: [],
-  keys: new Set(),
-  micStream: null,
-  peers: new Map(),
-  audio: new Map(),
-  id: crypto.randomUUID(),
-  name: `Player${Math.floor(100 + Math.random() * 900)}`,
-  x: WORLD.width / 2,
-  y: WORLD.height / 2,
-  speed: 5,
+  socket: null, connected: false, players: new Map(), messages: [], pendingChats: [], keys: new Set(),
+  micStream: null, peers: new Map(), audio: new Map(), id: crypto.randomUUID(),
+  name: `Player${Math.floor(100 + Math.random() * 900)}`, x: WORLD.width / 2, y: WORLD.height / 2, speed: 5,
 };
 
 const app = document.querySelector('#root');
 app.innerHTML = `
   <div class="app">
-    <header class="topbar">
-      <div class="brand"><span class="brand-dot"></span><strong>Proxy</strong><span>Chat</span></div>
-      <div class="status"><i id="statusDot"></i><span id="statusText">Connexion…</span></div>
-      <button class="ghost" id="profileBtn">👤 <span id="profileName"></span></button>
-    </header>
-    <main class="game-shell">
-      <section class="world-wrap">
-        <canvas id="world" width="1200" height="760"></canvas>
-        <div class="hint">WASD / flèches pour bouger · <b>Entrée</b> pour envoyer</div>
-        <div class="voice-pill" id="voicePill">🎙️ Micro désactivé</div>
-      </section>
-      <aside class="chat-panel">
-        <div class="chat-head"><div><h1>Chat de proximité</h1><p id="nearby">Recherche des joueurs…</p></div><span class="live">LIVE</span></div>
-        <div class="messages" id="messages"></div>
-        <form class="composer" id="composer">
-          <input id="messageInput" maxlength="180" autocomplete="off" placeholder="Écris aux personnes proches…" />
-          <button type="submit" aria-label="Envoyer">➤</button>
-        </form>
-        <div class="controls">
-          <button class="control" id="micBtn">🎙️ Activer le micro</button>
-          <button class="control" id="centerBtn">⌖ Recentrer</button>
-        </div>
-      </aside>
-    </main>
-    <div class="modal hidden" id="profileModal"><div class="modal-card"><button class="close" id="closeModal">×</button><h2>Ton profil</h2><label>Pseudo<input id="nameInput" maxlength="18" /></label><button class="primary" id="saveName">Enregistrer</button></div></div>
-  </div>
-`;
+    <header class="topbar"><div class="brand"><span class="brand-dot"></span><strong>Proxy</strong><span>Chat</span></div><div class="status"><i id="statusDot"></i><span id="statusText">Connexion…</span></div><button class="ghost" id="profileBtn">👤 <span id="profileName"></span></button></header>
+    <main class="game-shell"><section class="world-wrap"><canvas id="world" width="1200" height="760"></canvas><div class="hint">🕹️ Joystick ou <b>ZQSD</b> pour bouger · <b>Entrée</b> pour envoyer</div><div class="voice-pill" id="voicePill">🎙️ Micro désactivé</div></section>
+      <aside class="chat-panel"><div class="chat-head"><div><h1>Chat de proximité</h1><p id="nearby">Recherche des joueurs…</p></div><span class="live">LIVE</span></div><div class="messages" id="messages"></div><form class="composer" id="composer"><input id="messageInput" maxlength="180" autocomplete="off" placeholder="Écris aux personnes proches…" /><button type="submit" aria-label="Envoyer">➤</button></form><div class="controls"><button class="control" id="micBtn">🎙️ Activer le micro</button><button class="control" id="centerBtn">⌖ Recentrer</button></div></aside>
+    </main><div class="modal hidden" id="profileModal"><div class="modal-card"><button class="close" id="closeModal">×</button><h2>Ton profil</h2><label>Pseudo<input id="nameInput" maxlength="18" /></label><button class="primary" id="saveName">Enregistrer</button></div></div>
+  </div>`;
 
-const canvas = document.querySelector('#world');
-const ctx = canvas.getContext('2d');
-const messagesEl = document.querySelector('#messages');
-const nearbyEl = document.querySelector('#nearby');
-const statusDot = document.querySelector('#statusDot');
-const statusText = document.querySelector('#statusText');
-const input = document.querySelector('#messageInput');
-const micBtn = document.querySelector('#micBtn');
-const voicePill = document.querySelector('#voicePill');
+const canvas = document.querySelector('#world'), ctx = canvas.getContext('2d'), messagesEl = document.querySelector('#messages'), nearbyEl = document.querySelector('#nearby'), statusDot = document.querySelector('#statusDot'), statusText = document.querySelector('#statusText'), input = document.querySelector('#messageInput'), micBtn = document.querySelector('#micBtn'), voicePill = document.querySelector('#voicePill');
+function escapeHtml(value){return String(value).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
+function distance(a,b){return Math.hypot(a.x-b.x,a.y-b.y);}
+function setStatus(ok,text){state.connected=ok;statusDot.className=ok?'ok':'';statusText.textContent=text;}
+function addMessage(message){state.messages.push(message);state.messages=state.messages.slice(-60);messagesEl.innerHTML=state.messages.map(m=>`<div class="msg ${m.player?.id===state.id?'mine':''}"><div><b>${escapeHtml(m.name)}</b><span>${new Date(m.at||Date.now()).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span></div><p>${escapeHtml(m.text)}</p></div>`).join('');messagesEl.scrollTop=messagesEl.scrollHeight;}
 
-function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
-function distance(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
-function setStatus(ok, text) { state.connected = ok; statusDot.className = ok ? 'ok' : ''; statusText.textContent = text; }
-
-function addMessage(message) {
-  state.messages.push(message);
-  state.messages = state.messages.slice(-60);
-  messagesEl.innerHTML = state.messages.map(m => `<div class="msg"><div><b>${escapeHtml(m.name)}</b><span>${new Date(m.at || Date.now()).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</span></div><p>${escapeHtml(m.text)}</p></div>`).join('');
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+function sendChat(){
+  const text=input.value.trim(); if(!text)return;
+  const message={type:'chat',text};
+  // WhatsApp-style: show our own sent message immediately, even before the server replies.
+  addMessage({name:state.name,text,at:Date.now(),player:{id:state.id,x:state.x,y:state.y}});
+  if(state.socket?.readyState===WebSocket.OPEN) state.socket.send(JSON.stringify(message));
+  else state.pendingChats.push(message);
+  input.value=''; input.focus();
 }
+document.querySelector('#composer').addEventListener('submit',e=>{e.preventDefault();sendChat();});
+function flushPendingChats(){if(state.socket?.readyState!==WebSocket.OPEN||!state.pendingChats.length)return;for(const message of state.pendingChats)state.socket.send(JSON.stringify(message));state.pendingChats=[];}
 
-function sendChat() {
-  const text = input.value.trim();
-  if (!text) return;
-
-  const message = { type:'chat', text };
-
-  // Affiche immédiatement le message chez l'expéditeur.
-  // Le serveur le renverra aussi aux personnes à proximité.
-  if (state.socket?.readyState === WebSocket.OPEN) {
-    state.socket.send(JSON.stringify(message));
-  } else {
-    // Ne perd pas le message si le serveur est momentanément en reconnexion.
-    state.pendingChats.push(message);
-    addMessage({ name: state.name, text, at: Date.now(), player: { id: state.id, x: state.x, y: state.y } });
-  }
-
-  input.value = '';
-  input.focus();
-}
-
-document.querySelector('#composer').addEventListener('submit', e => {
-  e.preventDefault();
-  sendChat();
-});
-
-function flushPendingChats() {
-  if (state.socket?.readyState !== WebSocket.OPEN || !state.pendingChats.length) return;
-  for (const message of state.pendingChats) state.socket.send(JSON.stringify(message));
-  state.pendingChats = [];
-}
-
-function connect() {
-  try { state.socket = new WebSocket(SERVER_URL); } catch { setStatus(false, 'Hors ligne'); return; }
-  state.socket.onopen = () => {
-    setStatus(true, 'En ligne');
-    state.socket.send(JSON.stringify({type:'join', id:state.id, name:state.name, x:state.x, y:state.y}));
-    flushPendingChats();
-  };
-  state.socket.onclose = () => {
-    setStatus(false, 'Serveur indisponible');
-    for (const id of state.peers.keys()) closePeer(id);
-    setTimeout(connect, 2500);
-  };
-  state.socket.onerror = () => setStatus(false, 'Connexion interrompue');
-  state.socket.onmessage = async event => {
-    const data = JSON.parse(event.data);
-    if (data.type === 'snapshot') {
-      state.players.clear();
-      for (const p of data.players) if (p.id !== state.id) state.players.set(p.id, p);
-      updateNearby();
-    }
-    if (data.type === 'player:join' && data.player.id !== state.id) state.players.set(data.player.id, data.player);
-    if (data.type === 'player:move' && data.player.id !== state.id) state.players.set(data.player.id, data.player);
-    if (data.type === 'player:leave') { state.players.delete(data.id); closePeer(data.id); }
-    if (data.type === 'chat') {
-      // Évite le doublon si le serveur renvoie notre propre message.
-      const isMine = data.player?.id === state.id;
-      if (!isMine && data.player && distance(state, data.player) <= CHAT_RADIUS) addMessage(data);
-    }
-    if (data.type === 'voice:offer' || data.type === 'voice:answer' || data.type === 'voice:ice') await handleSignal(data);
+function connect(){
+  try{state.socket=new WebSocket(SERVER_URL);}catch{setStatus(false,'Hors ligne');return;}
+  state.socket.onopen=()=>{setStatus(true,'En ligne');state.socket.send(JSON.stringify({type:'join',id:state.id,name:state.name,x:state.x,y:state.y}));flushPendingChats();};
+  state.socket.onclose=()=>{setStatus(false,'Serveur indisponible');for(const id of state.peers.keys())closePeer(id);setTimeout(connect,2500);};
+  state.socket.onerror=()=>setStatus(false,'Connexion interrompue');
+  state.socket.onmessage=async event=>{const data=JSON.parse(event.data);
+    if(data.type==='snapshot'){state.players.clear();for(const p of data.players)if(p.id!==state.id)state.players.set(p.id,p);updateNearby();}
+    if(data.type==='player:join'&&data.player.id!==state.id)state.players.set(data.player.id,data.player);
+    if(data.type==='player:move'&&data.player.id!==state.id)state.players.set(data.player.id,data.player);
+    if(data.type==='player:leave'){state.players.delete(data.id);closePeer(data.id);}
+    if(data.type==='chat'){const isMine=data.player?.id===state.id;if(!isMine&&data.player&&distance(state,data.player)<=CHAT_RADIUS)addMessage(data);}
+    if(data.type==='voice:offer'||data.type==='voice:answer'||data.type==='voice:ice')await handleSignal(data);
   };
 }
-
-function broadcastPosition() {
-  if (state.socket?.readyState !== WebSocket.OPEN) return;
-  state.socket.send(JSON.stringify({type:'move', x:state.x, y:state.y}));
-}
-
-function updateNearby() {
-  const count = [...state.players.values()].filter(p => distance(state, p) <= CHAT_RADIUS).length;
-  nearbyEl.textContent = count ? `${count} personne${count > 1 ? 's' : ''} dans ta zone` : 'Personne à proximité';
-}
-
-window.addEventListener('keydown', e => {
-  // Entrée envoie le message lorsqu'on écrit dans le champ.
-  if (e.key === 'Enter' && document.activeElement === input) {
-    e.preventDefault();
-    sendChat();
-    return;
-  }
-  if (['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)) return;
-  state.keys.add(e.key.toLowerCase());
-});
-window.addEventListener('keyup', e => state.keys.delete(e.key.toLowerCase()));
-
-function update() {
-  let dx = 0, dy = 0;
-  if (state.keys.has('w') || state.keys.has('arrowup')) dy -= 1;
-  if (state.keys.has('s') || state.keys.has('arrowdown')) dy += 1;
-  if (state.keys.has('a') || state.keys.has('arrowleft')) dx -= 1;
-  if (state.keys.has('d') || state.keys.has('arrowright')) dx += 1;
-  if (dx || dy) {
-    const len = Math.hypot(dx, dy);
-    state.x = Math.max(40, Math.min(WORLD.width - 40, state.x + dx / len * state.speed));
-    state.y = Math.max(40, Math.min(WORLD.height - 40, state.y + dy / len * state.speed));
-    broadcastPosition();
-  }
-  updateNearby();
-  updateVoiceDistances();
-}
-
-function worldToScreen(x, y) {
-  const scale = Math.min(canvas.width / WORLD.width, canvas.height / WORLD.height) * 0.98;
-  return { x: canvas.width/2 + (x-state.x)*scale, y: canvas.height/2 + (y-state.y)*scale, scale };
-}
-
-function drawPlayer(p, me=false) {
-  const s = worldToScreen(p.x,p.y); const r = 16;
-  if (s.x < -50 || s.x > canvas.width+50 || s.y < -50 || s.y > canvas.height+50) return;
-  ctx.beginPath(); ctx.arc(s.x,s.y,r,0,Math.PI*2); ctx.fillStyle = me ? '#8b5cf6' : '#22d3ee'; ctx.fill();
-  ctx.lineWidth=3; ctx.strokeStyle='rgba(255,255,255,.75)'; ctx.stroke();
-  ctx.font='600 14px Inter,system-ui'; ctx.textAlign='center'; ctx.fillStyle='#fff'; ctx.fillText(p.name,s.x,s.y-25);
-}
-
-function render() {
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  const grad=ctx.createLinearGradient(0,0,canvas.width,canvas.height); grad.addColorStop(0,'#111827'); grad.addColorStop(1,'#0b1220'); ctx.fillStyle=grad; ctx.fillRect(0,0,canvas.width,canvas.height);
-  const scale=Math.min(canvas.width/WORLD.width,canvas.height/WORLD.height)*0.98;
-  for(let x=-120;x<canvas.width+120;x+=80*scale) for(let y=-120;y<canvas.height+120;y+=80*scale){ctx.fillStyle='rgba(255,255,255,.035)';ctx.fillRect(x,y,2,2);}
-  const zoneR=CHAT_RADIUS*scale; ctx.beginPath();ctx.arc(canvas.width/2,canvas.height/2,zoneR,0,Math.PI*2);ctx.fillStyle='rgba(139,92,246,.06)';ctx.fill();ctx.strokeStyle='rgba(139,92,246,.2)';ctx.stroke();
-  for(const p of state.players.values()) drawPlayer(p);
-  drawPlayer({x:state.x,y:state.y,name:state.name},true);
-  requestAnimationFrame(render);
-}
-
-function createPeer(id) {
-  if (state.peers.has(id)) return state.peers.get(id);
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  state.peers.set(id, pc);
-  if (state.micStream) state.micStream.getTracks().forEach(t => pc.addTrack(t, state.micStream));
-  pc.onicecandidate = e => e.candidate && state.socket?.send(JSON.stringify({type:'voice:ice',to:id,candidate:e.candidate}));
-  pc.ontrack = e => {
-    let audio = state.audio.get(id);
-    if (!audio) {
-      audio = document.createElement('audio');
-      audio.autoplay = true;
-      audio.playsInline = true;
-      audio.dataset.peer = id;
-      document.body.appendChild(audio);
-      state.audio.set(id, audio);
-    }
-    audio.srcObject = e.streams[0];
-    audio.play().catch(() => {});
-  };
-  pc.onconnectionstatechange = () => {
-    if (['failed','closed','disconnected'].includes(pc.connectionState)) closePeer(id);
-  };
-  return pc;
-}
-
-function closePeer(id) {
-  const pc = state.peers.get(id);
-  if (pc) pc.close();
-  state.peers.delete(id);
-  const audio = state.audio.get(id);
-  if (audio) { audio.srcObject = null; audio.remove(); }
-  state.audio.delete(id);
-}
-
-async function handleSignal(data) {
-  if (data.from === state.id) return;
-  const pc = createPeer(data.from);
-  try {
-    if (data.type === 'voice:offer') {
-      await pc.setRemoteDescription(data.offer);
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      state.socket.send(JSON.stringify({type:'voice:answer',to:data.from,answer}));
-    } else if (data.type === 'voice:answer') {
-      await pc.setRemoteDescription(data.answer);
-    } else if (data.type === 'voice:ice' && data.candidate) {
-      await pc.addIceCandidate(data.candidate);
-    }
-  } catch (err) { console.warn('Voice signaling error', err); }
-}
-
-async function startVoicePeer(id) {
-  const player = state.players.get(id);
-  if (!state.micStream || !player || state.peers.has(id) || distance(state, player) > VOICE_RADIUS) return;
-  const pc = createPeer(id);
-  try {
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    state.socket.send(JSON.stringify({type:'voice:offer',to:id,offer}));
-  } catch (err) { console.warn('Voice offer error', err); }
-}
-
-function updateVoiceDistances() {
-  for (const [id, audio] of state.audio) {
-    const p = state.players.get(id);
-    if (!p) { closePeer(id); continue; }
-    const d = distance(state, p);
-    if (d > VOICE_RADIUS) {
-      audio.volume = 0;
-    } else {
-      audio.volume = Math.max(0, 1 - d / VOICE_RADIUS);
-    }
-  }
-  if (state.micStream) {
-    for (const p of state.players.values()) {
-      if (distance(state, p) <= VOICE_RADIUS) startVoicePeer(p.id);
-    }
-  }
-}
-
-async function toggleMic() {
-  if (state.micStream) {
-    state.micStream.getTracks().forEach(t=>t.stop());
-    state.micStream=null;
-    for (const id of [...state.peers.keys()]) closePeer(id);
-    micBtn.textContent='🎙️ Activer le micro';
-    voicePill.textContent='🎙️ Micro désactivé';
-    return;
-  }
-  try {
-    state.micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
-    micBtn.textContent='🔴 Couper le micro';
-    voicePill.textContent='🎙️ Micro actif · proximité';
-    for (const p of state.players.values()) if (distance(state,p)<=VOICE_RADIUS) startVoicePeer(p.id);
-  } catch { addMessage({name:'Proxy Chat',text:'Autorise le micro dans ton navigateur pour utiliser le vocal.',at:Date.now()}); }
-}
-
-micBtn.addEventListener('click',toggleMic);
-document.querySelector('#centerBtn').onclick=()=>{state.x=WORLD.width/2;state.y=WORLD.height/2;broadcastPosition();};
-document.querySelector('#profileBtn').onclick=()=>{document.querySelector('#nameInput').value=state.name;document.querySelector('#profileModal').classList.remove('hidden');};
-document.querySelector('#closeModal').onclick=()=>document.querySelector('#profileModal').classList.add('hidden');
-document.querySelector('#saveName').onclick=()=>{const n=document.querySelector('#nameInput').value.trim().replace(/[^\p{L}\p{N}_ -]/gu,'').slice(0,18);if(n){state.name=n;document.querySelector('#profileName').textContent=n;broadcastPosition();}document.querySelector('#profileModal').classList.add('hidden');};
-document.querySelector('#profileName').textContent=state.name;
-
-setInterval(update,50);
-connect();
-render();
+function broadcastPosition(){if(state.socket?.readyState===WebSocket.OPEN)state.socket.send(JSON.stringify({type:'move',x:state.x,y:state.y}));}
+function updateNearby(){const count=[...state.players.values()].filter(p=>distance(state,p)<=CHAT_RADIUS).length;nearbyEl.textContent=count?`${count} personne${count>1?'s':''} dans ta zone`:'Personne à proximité';}
+window.addEventListener('keydown',e=>{if(e.key==='Enter'&&document.activeElement===input){e.preventDefault();sendChat();return;}if(['INPUT','TEXTAREA'].includes(document.activeElement?.tagName))return;state.keys.add(e.key.toLowerCase());});
+window.addEventListener('keyup',e=>state.keys.delete(e.key.toLowerCase()));
+function update(){let dx=0,dy=0;if(state.keys.has('z')||state.keys.has('arrowup')||state.keys.has('w'))dy-=1;if(state.keys.has('s')||state.keys.has('arrowdown'))dy+=1;if(state.keys.has('q')||state.keys.has('arrowleft')||state.keys.has('a'))dx-=1;if(state.keys.has('d')||state.keys.has('arrowright'))dx+=1;if(dx||dy){const len=Math.hypot(dx,dy);state.x=Math.max(40,Math.min(WORLD.width-40,state.x+dx/len*state.speed));state.y=Math.max(40,Math.min(WORLD.height-40,state.y+dy/len*state.speed));broadcastPosition();}updateNearby();updateVoiceDistances();}
+function worldToScreen(x,y){const scale=Math.min(canvas.width/WORLD.width,canvas.height/WORLD.height)*.98;return{x:canvas.width/2+(x-state.x)*scale,y:canvas.height/2+(y-state.y)*scale,scale};}
+function drawPlayer(p,me=false){const s=worldToScreen(p.x,p.y),r=16;if(s.x<-50||s.x>canvas.width+50||s.y<-50||s.y>canvas.height+50)return;ctx.beginPath();ctx.arc(s.x,s.y,r,0,Math.PI*2);ctx.fillStyle=me?'#8b5cf6':'#22d3ee';ctx.fill();ctx.lineWidth=3;ctx.strokeStyle='rgba(255,255,255,.75)';ctx.stroke();ctx.font='600 14px Inter,system-ui';ctx.textAlign='center';ctx.fillStyle='#fff';ctx.fillText(p.name,s.x,s.y-25);}
+function render(){ctx.clearRect(0,0,canvas.width,canvas.height);const grad=ctx.createLinearGradient(0,0,canvas.width,canvas.height);grad.addColorStop(0,'#111827');grad.addColorStop(1,'#0b1220');ctx.fillStyle=grad;ctx.fillRect(0,0,canvas.width,canvas.height);const scale=Math.min(canvas.width/WORLD.width,canvas.height/WORLD.height)*.98;for(let x=-120;x<canvas.width+120;x+=80*scale)for(let y=-120;y<canvas.height+120;y+=80*scale){ctx.fillStyle='rgba(255,255,255,.035)';ctx.fillRect(x,y,2,2);}const zoneR=CHAT_RADIUS*scale;ctx.beginPath();ctx.arc(canvas.width/2,canvas.height/2,zoneR,0,Math.PI*2);ctx.fillStyle='rgba(139,92,246,.06)';ctx.fill();ctx.strokeStyle='rgba(139,92,246,.2)';ctx.stroke();for(const p of state.players.values())drawPlayer(p);drawPlayer({x:state.x,y:state.y,name:state.name},true);requestAnimationFrame(render);}
+function createPeer(id){if(state.peers.has(id))return state.peers.get(id);const pc=new RTCPeerConnection({iceServers:ICE_SERVERS});state.peers.set(id,pc);if(state.micStream)state.micStream.getTracks().forEach(t=>pc.addTrack(t,state.micStream));pc.onicecandidate=e=>e.candidate&&state.socket?.send(JSON.stringify({type:'voice:ice',to:id,candidate:e.candidate}));pc.ontrack=e=>{let audio=state.audio.get(id);if(!audio){audio=document.createElement('audio');audio.autoplay=true;audio.playsInline=true;audio.dataset.peer=id;document.body.appendChild(audio);state.audio.set(id,audio);}audio.srcObject=e.streams[0];audio.play().catch(()=>{});};pc.onconnectionstatechange=()=>{if(['failed','closed','disconnected'].includes(pc.connectionState))closePeer(id);};return pc;}
+function closePeer(id){const pc=state.peers.get(id);if(pc)pc.close();state.peers.delete(id);const audio=state.audio.get(id);if(audio){audio.srcObject=null;audio.remove();}state.audio.delete(id);}
+async function handleSignal(data){if(data.from===state.id)return;const pc=createPeer(data.from);try{if(data.type==='voice:offer'){await pc.setRemoteDescription(data.offer);const answer=await pc.createAnswer();await pc.setLocalDescription(answer);state.socket.send(JSON.stringify({type:'voice:answer',to:data.from,answer}));}else if(data.type==='voice:answer')await pc.setRemoteDescription(data.answer);else if(data.type==='voice:ice'&&data.candidate)await pc.addIceCandidate(data.candidate);}catch(err){console.warn('Voice signaling error',err);}}
+async function startVoicePeer(id){const player=state.players.get(id);if(!state.micStream||!player||state.peers.has(id)||distance(state,player)>VOICE_RADIUS)return;const pc=createPeer(id);try{const offer=await pc.createOffer();await pc.setLocalDescription(offer);state.socket.send(JSON.stringify({type:'voice:offer',to:id,offer}));}catch(err){console.warn('Voice offer error',err);}}
+function updateVoiceDistances(){for(const [id,audio] of state.audio){const p=state.players.get(id);if(!p){closePeer(id);continue;}const d=distance(state,p);audio.volume=d>VOICE_RADIUS?0:Math.max(0,1-d/VOICE_RADIUS);}if(state.micStream)for(const p of state.players.values())if(distance(state,p)<=VOICE_RADIUS)startVoicePeer(p.id);}
+async function toggleMic(){if(state.micStream){state.micStream.getTracks().forEach(t=>t.stop());state.micStream=null;for(const id of [...state.peers.keys()])closePeer(id);micBtn.textContent='🎙️ Activer le micro';voicePill.textContent='🎙️ Micro désactivé';return;}try{state.micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});micBtn.textContent='🔴 Couper le micro';voicePill.textContent='🎙️ Micro actif · proximité';for(const p of state.players.values())if(distance(state,p)<=VOICE_RADIUS)startVoicePeer(p.id);}catch{addMessage({name:'Proxy Chat',text:'Autorise le micro dans ton navigateur pour utiliser le vocal.',at:Date.now()});}}
+micBtn.addEventListener('click',toggleMic);document.querySelector('#centerBtn').onclick=()=>{state.x=WORLD.width/2;state.y=WORLD.height/2;broadcastPosition();};document.querySelector('#profileBtn').onclick=()=>{document.querySelector('#nameInput').value=state.name;document.querySelector('#profileModal').classList.remove('hidden');};document.querySelector('#closeModal').onclick=()=>document.querySelector('#profileModal').classList.add('hidden');document.querySelector('#saveName').onclick=()=>{const n=document.querySelector('#nameInput').value.trim().replace(/[^\p{L}\p{N}_ -]/gu,'').slice(0,18);if(n){state.name=n;document.querySelector('#profileName').textContent=n;broadcastPosition();}document.querySelector('#profileModal').classList.add('hidden');};document.querySelector('#profileName').textContent=state.name;
+setInterval(update,50);connect();render();
