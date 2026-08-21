@@ -1,9 +1,13 @@
 import './style.css';
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL || `ws://${location.hostname || 'localhost'}:3001`;
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || (location.protocol === 'https:' ? `wss://${location.host}` : `ws://${location.hostname}:3001`);
 const WORLD = { width: 2400, height: 1500 };
 const CHAT_RADIUS = 360;
 const VOICE_RADIUS = 260;
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+];
 
 const state = {
   socket: null,
@@ -11,9 +15,9 @@ const state = {
   players: new Map(),
   messages: [],
   keys: new Set(),
-  muted: true,
   micStream: null,
   peers: new Map(),
+  audio: new Map(),
   id: crypto.randomUUID(),
   name: `Player${Math.floor(100 + Math.random() * 900)}`,
   x: WORLD.width / 2,
@@ -60,8 +64,9 @@ const statusDot = document.querySelector('#statusDot');
 const statusText = document.querySelector('#statusText');
 const input = document.querySelector('#messageInput');
 const micBtn = document.querySelector('#micBtn');
+const voicePill = document.querySelector('#voicePill');
 
-function escapeHtml(value) { return value.replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 function distance(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 function setStatus(ok, text) { state.connected = ok; statusDot.className = ok ? 'ok' : ''; statusText.textContent = text; }
 
@@ -74,9 +79,8 @@ function addMessage(message) {
 
 function sendChat() {
   const text = input.value.trim();
-  if (!text) return;
-  const payload = { type:'chat', text };
-  if (state.socket?.readyState === WebSocket.OPEN) state.socket.send(JSON.stringify(payload));
+  if (!text || state.socket?.readyState !== WebSocket.OPEN) return;
+  state.socket.send(JSON.stringify({ type:'chat', text }));
   input.value = '';
 }
 
@@ -84,21 +88,28 @@ document.querySelector('#composer').addEventListener('submit', e => { e.preventD
 
 function connect() {
   try { state.socket = new WebSocket(SERVER_URL); } catch { setStatus(false, 'Hors ligne'); return; }
-  state.socket.onopen = () => { setStatus(true, 'En ligne'); state.socket.send(JSON.stringify({type:'join', id:state.id, name:state.name, x:state.x, y:state.y})); };
-  state.socket.onclose = () => { setStatus(false, 'Serveur indisponible'); setTimeout(connect, 2500); };
+  state.socket.onopen = () => {
+    setStatus(true, 'En ligne');
+    state.socket.send(JSON.stringify({type:'join', id:state.id, name:state.name, x:state.x, y:state.y}));
+  };
+  state.socket.onclose = () => {
+    setStatus(false, 'Serveur indisponible');
+    for (const id of state.peers.keys()) closePeer(id);
+    setTimeout(connect, 2500);
+  };
   state.socket.onerror = () => setStatus(false, 'Connexion interrompue');
   state.socket.onmessage = async event => {
     const data = JSON.parse(event.data);
     if (data.type === 'snapshot') {
+      state.players.clear();
       for (const p of data.players) if (p.id !== state.id) state.players.set(p.id, p);
       updateNearby();
     }
     if (data.type === 'player:join' && data.player.id !== state.id) state.players.set(data.player.id, data.player);
     if (data.type === 'player:move' && data.player.id !== state.id) state.players.set(data.player.id, data.player);
-    if (data.type === 'player:leave') state.players.delete(data.id);
+    if (data.type === 'player:leave') { state.players.delete(data.id); closePeer(data.id); }
     if (data.type === 'chat') {
-      const me = {x:state.x,y:state.y};
-      if (distance(me, data.player) <= CHAT_RADIUS) addMessage(data);
+      if (data.player && distance(state, data.player) <= CHAT_RADIUS) addMessage(data);
     }
     if (data.type === 'voice:offer' || data.type === 'voice:answer' || data.type === 'voice:ice') await handleSignal(data);
   };
@@ -134,6 +145,7 @@ function update() {
     broadcastPosition();
   }
   updateNearby();
+  updateVoiceDistances();
 }
 
 function worldToScreen(x, y) {
@@ -160,40 +172,112 @@ function render() {
   requestAnimationFrame(render);
 }
 
-async function toggleMic() {
-  if (state.micStream) { state.micStream.getTracks().forEach(t=>t.stop()); state.micStream=null; state.muted=true; micBtn.textContent='🎙️ Activer le micro'; document.querySelector('#voicePill').textContent='🎙️ Micro désactivé'; return; }
-  try { state.micStream=await navigator.mediaDevices.getUserMedia({audio:true}); state.muted=false; micBtn.textContent='🔴 Couper le micro'; document.querySelector('#voicePill').textContent='🎙️ Micro actif · proximité'; }
-  catch { addMessage({name:'Proxy Chat',text:'Autorise le micro dans ton navigateur pour utiliser le vocal.',at:Date.now()}); }
+function createPeer(id) {
+  if (state.peers.has(id)) return state.peers.get(id);
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  state.peers.set(id, pc);
+  if (state.micStream) state.micStream.getTracks().forEach(t => pc.addTrack(t, state.micStream));
+  pc.onicecandidate = e => e.candidate && state.socket?.send(JSON.stringify({type:'voice:ice',to:id,candidate:e.candidate}));
+  pc.ontrack = e => {
+    let audio = state.audio.get(id);
+    if (!audio) {
+      audio = document.createElement('audio');
+      audio.autoplay = true;
+      audio.playsInline = true;
+      audio.dataset.peer = id;
+      document.body.appendChild(audio);
+      state.audio.set(id, audio);
+    }
+    audio.srcObject = e.streams[0];
+    audio.play().catch(() => {});
+  };
+  pc.onconnectionstatechange = () => {
+    if (['failed','closed','disconnected'].includes(pc.connectionState)) closePeer(id);
+  };
+  return pc;
 }
+
+function closePeer(id) {
+  const pc = state.peers.get(id);
+  if (pc) pc.close();
+  state.peers.delete(id);
+  const audio = state.audio.get(id);
+  if (audio) { audio.srcObject = null; audio.remove(); }
+  state.audio.delete(id);
+}
+
+async function handleSignal(data) {
+  if (data.from === state.id) return;
+  const pc = createPeer(data.from);
+  try {
+    if (data.type === 'voice:offer') {
+      await pc.setRemoteDescription(data.offer);
+      if (state.micStream) state.micStream.getTracks().forEach(t => {
+        if (![...pc.getSenders()].some(s => s.track === t)) pc.addTrack(t, state.micStream);
+      });
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      state.socket.send(JSON.stringify({type:'voice:answer',to:data.from,answer}));
+    } else if (data.type === 'voice:answer') {
+      await pc.setRemoteDescription(data.answer);
+    } else if (data.type === 'voice:ice' && data.candidate) {
+      await pc.addIceCandidate(data.candidate);
+    }
+  } catch (err) { console.warn('Voice signaling error', err); }
+}
+
+async function startVoicePeer(id) {
+  if (!state.micStream || state.peers.has(id) || distance(state, state.players.get(id)) > VOICE_RADIUS) return;
+  const pc = createPeer(id);
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    state.socket.send(JSON.stringify({type:'voice:offer',to:id,offer}));
+  } catch (err) { console.warn('Voice offer error', err); }
+}
+
+function updateVoiceDistances() {
+  for (const [id, audio] of state.audio) {
+    const p = state.players.get(id);
+    if (!p) { closePeer(id); continue; }
+    const d = distance(state, p);
+    if (d > VOICE_RADIUS) {
+      audio.volume = 0;
+    } else {
+      audio.volume = Math.max(0, 1 - d / VOICE_RADIUS);
+    }
+  }
+  if (state.micStream) {
+    for (const p of state.players.values()) {
+      if (distance(state, p) <= VOICE_RADIUS) startVoicePeer(p.id);
+    }
+  }
+}
+
+async function toggleMic() {
+  if (state.micStream) {
+    state.micStream.getTracks().forEach(t=>t.stop());
+    state.micStream=null;
+    for (const id of [...state.peers.keys()]) closePeer(id);
+    micBtn.textContent='🎙️ Activer le micro';
+    voicePill.textContent='🎙️ Micro désactivé';
+    return;
+  }
+  try {
+    state.micStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+    micBtn.textContent='🔴 Couper le micro';
+    voicePill.textContent='🎙️ Micro actif · proximité';
+    for (const p of state.players.values()) if (distance(state,p)<=VOICE_RADIUS) startVoicePeer(p.id);
+  } catch { addMessage({name:'Proxy Chat',text:'Autorise le micro dans ton navigateur pour utiliser le vocal.',at:Date.now()}); }
+}
+
 micBtn.addEventListener('click',toggleMic);
 document.querySelector('#centerBtn').onclick=()=>{state.x=WORLD.width/2;state.y=WORLD.height/2;broadcastPosition();};
-
 document.querySelector('#profileBtn').onclick=()=>{document.querySelector('#nameInput').value=state.name;document.querySelector('#profileModal').classList.remove('hidden');};
 document.querySelector('#closeModal').onclick=()=>document.querySelector('#profileModal').classList.add('hidden');
 document.querySelector('#saveName').onclick=()=>{const n=document.querySelector('#nameInput').value.trim().replace(/[^\p{L}\p{N}_ -]/gu,'').slice(0,18);if(n){state.name=n;document.querySelector('#profileName').textContent=n;broadcastPosition();}document.querySelector('#profileModal').classList.add('hidden');};
 document.querySelector('#profileName').textContent=state.name;
 
-// WebRTC signaling hooks. The server only relays SDP/ICE; actual audio stays peer-to-peer.
-async function handleSignal(data) {
-  if (!state.micStream) return;
-  let pc = state.peers.get(data.from);
-  if (!pc) {
-    pc = new RTCPeerConnection(); state.peers.set(data.from,pc);
-    state.micStream.getTracks().forEach(t=>pc.addTrack(t,state.micStream));
-    pc.onicecandidate=e=>e.candidate&&state.socket.send(JSON.stringify({type:'voice:ice',to:data.from,candidate:e.candidate}));
-    pc.ontrack=e=>{ const audio=new Audio(); audio.autoplay=true; audio.srcObject=e.streams[0]; audio.dataset.peer=data.from; audio.volume=.8; audio.play().catch(()=>{}); };
-  }
-  if (data.type==='voice:offer') { await pc.setRemoteDescription(data.offer); const answer=await pc.createAnswer(); await pc.setLocalDescription(answer); state.socket.send(JSON.stringify({type:'voice:answer',to:data.from,answer})); }
-  if (data.type==='voice:answer') await pc.setRemoteDescription(data.answer);
-  if (data.type==='voice:ice') await pc.addIceCandidate(data.candidate).catch(()=>{});
-}
-
-setInterval(()=>{ if(state.micStream) for(const p of state.players.values()) if(distance(state,p)<=VOICE_RADIUS && !state.peers.has(p.id)) startVoicePeer(p.id); },1000);
-async function startVoicePeer(id){
-  const pc=new RTCPeerConnection(); state.peers.set(id,pc); state.micStream.getTracks().forEach(t=>pc.addTrack(t,state.micStream));
-  pc.onicecandidate=e=>e.candidate&&state.socket.send(JSON.stringify({type:'voice:ice',to:id,candidate:e.candidate}));
-  pc.ontrack=e=>{const a=new Audio();a.autoplay=true;a.srcObject=e.streams[0];a.dataset.peer=id;a.play().catch(()=>{});};
-  const offer=await pc.createOffer(); await pc.setLocalDescription(offer); state.socket.send(JSON.stringify({type:'voice:offer',to:id,offer}));
-}
-
-setInterval(update,50); connect(); render();
+setInterval(update,50);
+connect();
+render();
