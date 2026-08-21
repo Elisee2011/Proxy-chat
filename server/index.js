@@ -1,7 +1,7 @@
 import http from 'node:http';
 import express from 'express';
 import { WebSocketServer } from 'ws';
-const PORT=Number(process.env.PORT||3001);const app=express();const players=new Map();const CHAT_RADIUS=360;
+const PORT=Number(process.env.PORT||3001);const app=express();const players=new Map();const CHAT_RADIUS=1200;
 app.get('/health',(_,res)=>res.json({ok:true,service:'proxy-chat',players:players.size}));
 const server=http.createServer(app);const wss=new WebSocketServer({server});
 const send=(ws,p)=>{if(ws.readyState===1)ws.send(JSON.stringify(p));};
