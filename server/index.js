@@ -19,12 +19,10 @@ wss.on('connection',ws=>{let id=null;
   if(data.type==='move'){const nx=Number(data.x),ny=Number(data.y);if(Number.isFinite(nx))me.x=Math.max(0,Math.min(2400,nx));if(Number.isFinite(ny))me.y=Math.max(0,Math.min(1500,ny));me.lastMove=Date.now();broadcast({type:'player:move',player:publicPlayer(me)},id);}
   if(data.type==='rename'){const old=me.name;me.name=cleanName(data.name);if(me.name!==old){const packet={type:'player:name',player:publicPlayer(me)};broadcast(packet);send(ws,packet);}}
   if(data.type==='chat'){const text=String(data.text||'').trim().slice(0,180);if(!text)return;for(const [targetId,target] of players)if(targetId===id||dist(me,target)<=CHAT_RADIUS)send(target.ws,{type:'chat',name:me.name,text,at:Date.now(),player:publicPlayer(me)});}
-  if(['voice:offer','voice:answer','voice:ice'].includes(data.type)&&data.to){const target=players.get(String(data.to));if(target)send(target.ws,{...data,from:id});}
+  if(['voice:request','voice:ready','voice:offer','voice:answer','voice:ice'].includes(data.type)&&data.to){const target=players.get(String(data.to));if(target)send(target.ws,{...data,from:id});}
  });
  ws.on('close',()=>{if(!id)return;players.delete(id);broadcast({type:'player:leave',id});});
  ws.on('error',()=>{});
 });
-
-// Keep idle connections alive. Movement itself is broadcast immediately by the move handler.
 setInterval(()=>{for(const client of players.values())if(client.ws.readyState===1)client.ws.ping();},15000);
 server.listen(PORT,()=>console.log(`Proxy Chat server listening on :${PORT}`));
