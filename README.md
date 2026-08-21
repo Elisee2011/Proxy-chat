@@ -39,6 +39,6 @@ VITE_SERVER_URL=wss://ton-serveur.example.com
 
 Le frontend est compatible avec Vercel. Le serveur WebSocket doit être déployé sur un environnement qui garde une connexion WebSocket persistante (par exemple un VPS, Railway, Render ou Fly.io). Une fonction serverless classique ne remplace pas ce serveur temps réel.
 
-## Prochaine étape recommandée
-
 Pour passer à une version plus proche d'un vrai monde social : moteur 3D, avatars personnalisables, plusieurs zones, matchmaking/rooms, amis/blocage/modération, et audio spatial réellement atténué selon la distance.
+
+<!-- Vercel redeploy trigger -->
