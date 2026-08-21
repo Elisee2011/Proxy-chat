@@ -1,0 +1,199 @@
+import './style.css';
+
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || `ws://${location.hostname || 'localhost'}:3001`;
+const WORLD = { width: 2400, height: 1500 };
+const CHAT_RADIUS = 360;
+const VOICE_RADIUS = 260;
+
+const state = {
+  socket: null,
+  connected: false,
+  players: new Map(),
+  messages: [],
+  keys: new Set(),
+  muted: true,
+  micStream: null,
+  peers: new Map(),
+  id: crypto.randomUUID(),
+  name: `Player${Math.floor(100 + Math.random() * 900)}`,
+  x: WORLD.width / 2,
+  y: WORLD.height / 2,
+  speed: 5,
+};
+
+const app = document.querySelector('#root');
+app.innerHTML = `
+  <div class="app">
+    <header class="topbar">
+      <div class="brand"><span class="brand-dot"></span><strong>Proxy</strong><span>Chat</span></div>
+      <div class="status"><i id="statusDot"></i><span id="statusText">Connexion…</span></div>
+      <button class="ghost" id="profileBtn">👤 <span id="profileName"></span></button>
+    </header>
+    <main class="game-shell">
+      <section class="world-wrap">
+        <canvas id="world" width="1200" height="760"></canvas>
+        <div class="hint">WASD / flèches pour bouger · <b>Entrée</b> pour parler</div>
+        <div class="voice-pill" id="voicePill">🎙️ Micro désactivé</div>
+      </section>
+      <aside class="chat-panel">
+        <div class="chat-head"><div><h1>Chat de proximité</h1><p id="nearby">Recherche des joueurs…</p></div><span class="live">LIVE</span></div>
+        <div class="messages" id="messages"></div>
+        <form class="composer" id="composer">
+          <input id="messageInput" maxlength="180" autocomplete="off" placeholder="Écris aux personnes proches…" />
+          <button aria-label="Envoyer">➤</button>
+        </form>
+        <div class="controls">
+          <button class="control" id="micBtn">🎙️ Activer le micro</button>
+          <button class="control" id="centerBtn">⌖ Recentrer</button>
+        </div>
+      </aside>
+    </main>
+    <div class="modal hidden" id="profileModal"><div class="modal-card"><button class="close" id="closeModal">×</button><h2>Ton profil</h2><label>Pseudo<input id="nameInput" maxlength="18" /></label><button class="primary" id="saveName">Enregistrer</button></div></div>
+  </div>
+`;
+
+const canvas = document.querySelector('#world');
+const ctx = canvas.getContext('2d');
+const messagesEl = document.querySelector('#messages');
+const nearbyEl = document.querySelector('#nearby');
+const statusDot = document.querySelector('#statusDot');
+const statusText = document.querySelector('#statusText');
+const input = document.querySelector('#messageInput');
+const micBtn = document.querySelector('#micBtn');
+
+function escapeHtml(value) { return value.replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+function distance(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+function setStatus(ok, text) { state.connected = ok; statusDot.className = ok ? 'ok' : ''; statusText.textContent = text; }
+
+function addMessage(message) {
+  state.messages.push(message);
+  state.messages = state.messages.slice(-60);
+  messagesEl.innerHTML = state.messages.map(m => `<div class="msg"><div><b>${escapeHtml(m.name)}</b><span>${new Date(m.at || Date.now()).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</span></div><p>${escapeHtml(m.text)}</p></div>`).join('');
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+function sendChat() {
+  const text = input.value.trim();
+  if (!text) return;
+  const payload = { type:'chat', text };
+  if (state.socket?.readyState === WebSocket.OPEN) state.socket.send(JSON.stringify(payload));
+  input.value = '';
+}
+
+document.querySelector('#composer').addEventListener('submit', e => { e.preventDefault(); sendChat(); });
+
+function connect() {
+  try { state.socket = new WebSocket(SERVER_URL); } catch { setStatus(false, 'Hors ligne'); return; }
+  state.socket.onopen = () => { setStatus(true, 'En ligne'); state.socket.send(JSON.stringify({type:'join', id:state.id, name:state.name, x:state.x, y:state.y})); };
+  state.socket.onclose = () => { setStatus(false, 'Serveur indisponible'); setTimeout(connect, 2500); };
+  state.socket.onerror = () => setStatus(false, 'Connexion interrompue');
+  state.socket.onmessage = async event => {
+    const data = JSON.parse(event.data);
+    if (data.type === 'snapshot') {
+      for (const p of data.players) if (p.id !== state.id) state.players.set(p.id, p);
+      updateNearby();
+    }
+    if (data.type === 'player:join' && data.player.id !== state.id) state.players.set(data.player.id, data.player);
+    if (data.type === 'player:move' && data.player.id !== state.id) state.players.set(data.player.id, data.player);
+    if (data.type === 'player:leave') state.players.delete(data.id);
+    if (data.type === 'chat') {
+      const me = {x:state.x,y:state.y};
+      if (distance(me, data.player) <= CHAT_RADIUS) addMessage(data);
+    }
+    if (data.type === 'voice:offer' || data.type === 'voice:answer' || data.type === 'voice:ice') await handleSignal(data);
+  };
+}
+
+function broadcastPosition() {
+  if (state.socket?.readyState !== WebSocket.OPEN) return;
+  state.socket.send(JSON.stringify({type:'move', x:state.x, y:state.y}));
+}
+
+function updateNearby() {
+  const count = [...state.players.values()].filter(p => distance(state, p) <= CHAT_RADIUS).length;
+  nearbyEl.textContent = count ? `${count} personne${count > 1 ? 's' : ''} dans ta zone` : 'Personne à proximité';
+}
+
+window.addEventListener('keydown', e => {
+  if (['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)) return;
+  state.keys.add(e.key.toLowerCase());
+  if (e.key === 'Enter') input.focus();
+});
+window.addEventListener('keyup', e => state.keys.delete(e.key.toLowerCase()));
+
+function update() {
+  let dx = 0, dy = 0;
+  if (state.keys.has('w') || state.keys.has('arrowup')) dy -= 1;
+  if (state.keys.has('s') || state.keys.has('arrowdown')) dy += 1;
+  if (state.keys.has('a') || state.keys.has('arrowleft')) dx -= 1;
+  if (state.keys.has('d') || state.keys.has('arrowright')) dx += 1;
+  if (dx || dy) {
+    const len = Math.hypot(dx, dy);
+    state.x = Math.max(40, Math.min(WORLD.width - 40, state.x + dx / len * state.speed));
+    state.y = Math.max(40, Math.min(WORLD.height - 40, state.y + dy / len * state.speed));
+    broadcastPosition();
+  }
+  updateNearby();
+}
+
+function worldToScreen(x, y) {
+  const scale = Math.min(canvas.width / WORLD.width, canvas.height / WORLD.height) * 0.98;
+  return { x: canvas.width/2 + (x-state.x)*scale, y: canvas.height/2 + (y-state.y)*scale, scale };
+}
+
+function drawPlayer(p, me=false) {
+  const s = worldToScreen(p.x,p.y); const r = 16;
+  if (s.x < -50 || s.x > canvas.width+50 || s.y < -50 || s.y > canvas.height+50) return;
+  ctx.beginPath(); ctx.arc(s.x,s.y,r,0,Math.PI*2); ctx.fillStyle = me ? '#8b5cf6' : '#22d3ee'; ctx.fill();
+  ctx.lineWidth=3; ctx.strokeStyle='rgba(255,255,255,.75)'; ctx.stroke();
+  ctx.font='600 14px Inter,system-ui'; ctx.textAlign='center'; ctx.fillStyle='#fff'; ctx.fillText(p.name,s.x,s.y-25);
+}
+
+function render() {
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  const grad=ctx.createLinearGradient(0,0,canvas.width,canvas.height); grad.addColorStop(0,'#111827'); grad.addColorStop(1,'#0b1220'); ctx.fillStyle=grad; ctx.fillRect(0,0,canvas.width,canvas.height);
+  const scale=Math.min(canvas.width/WORLD.width,canvas.height/WORLD.height)*0.98;
+  for(let x=-120;x<canvas.width+120;x+=80*scale) for(let y=-120;y<canvas.height+120;y+=80*scale){ctx.fillStyle='rgba(255,255,255,.035)';ctx.fillRect(x,y,2,2);}
+  const zoneR=CHAT_RADIUS*scale; ctx.beginPath();ctx.arc(canvas.width/2,canvas.height/2,zoneR,0,Math.PI*2);ctx.fillStyle='rgba(139,92,246,.06)';ctx.fill();ctx.strokeStyle='rgba(139,92,246,.2)';ctx.stroke();
+  for(const p of state.players.values()) drawPlayer(p);
+  drawPlayer({x:state.x,y:state.y,name:state.name},true);
+  requestAnimationFrame(render);
+}
+
+async function toggleMic() {
+  if (state.micStream) { state.micStream.getTracks().forEach(t=>t.stop()); state.micStream=null; state.muted=true; micBtn.textContent='🎙️ Activer le micro'; document.querySelector('#voicePill').textContent='🎙️ Micro désactivé'; return; }
+  try { state.micStream=await navigator.mediaDevices.getUserMedia({audio:true}); state.muted=false; micBtn.textContent='🔴 Couper le micro'; document.querySelector('#voicePill').textContent='🎙️ Micro actif · proximité'; }
+  catch { addMessage({name:'Proxy Chat',text:'Autorise le micro dans ton navigateur pour utiliser le vocal.',at:Date.now()}); }
+}
+micBtn.addEventListener('click',toggleMic);
+document.querySelector('#centerBtn').onclick=()=>{state.x=WORLD.width/2;state.y=WORLD.height/2;broadcastPosition();};
+
+document.querySelector('#profileBtn').onclick=()=>{document.querySelector('#nameInput').value=state.name;document.querySelector('#profileModal').classList.remove('hidden');};
+document.querySelector('#closeModal').onclick=()=>document.querySelector('#profileModal').classList.add('hidden');
+document.querySelector('#saveName').onclick=()=>{const n=document.querySelector('#nameInput').value.trim().replace(/[^\p{L}\p{N}_ -]/gu,'').slice(0,18);if(n){state.name=n;document.querySelector('#profileName').textContent=n;broadcastPosition();}document.querySelector('#profileModal').classList.add('hidden');};
+document.querySelector('#profileName').textContent=state.name;
+
+// WebRTC signaling hooks. The server only relays SDP/ICE; actual audio stays peer-to-peer.
+async function handleSignal(data) {
+  if (!state.micStream) return;
+  let pc = state.peers.get(data.from);
+  if (!pc) {
+    pc = new RTCPeerConnection(); state.peers.set(data.from,pc);
+    state.micStream.getTracks().forEach(t=>pc.addTrack(t,state.micStream));
+    pc.onicecandidate=e=>e.candidate&&state.socket.send(JSON.stringify({type:'voice:ice',to:data.from,candidate:e.candidate}));
+    pc.ontrack=e=>{ const audio=new Audio(); audio.autoplay=true; audio.srcObject=e.streams[0]; audio.dataset.peer=data.from; audio.volume=.8; audio.play().catch(()=>{}); };
+  }
+  if (data.type==='voice:offer') { await pc.setRemoteDescription(data.offer); const answer=await pc.createAnswer(); await pc.setLocalDescription(answer); state.socket.send(JSON.stringify({type:'voice:answer',to:data.from,answer})); }
+  if (data.type==='voice:answer') await pc.setRemoteDescription(data.answer);
+  if (data.type==='voice:ice') await pc.addIceCandidate(data.candidate).catch(()=>{});
+}
+
+setInterval(()=>{ if(state.micStream) for(const p of state.players.values()) if(distance(state,p)<=VOICE_RADIUS && !state.peers.has(p.id)) startVoicePeer(p.id); },1000);
+async function startVoicePeer(id){
+  const pc=new RTCPeerConnection(); state.peers.set(id,pc); state.micStream.getTracks().forEach(t=>pc.addTrack(t,state.micStream));
+  pc.onicecandidate=e=>e.candidate&&state.socket.send(JSON.stringify({type:'voice:ice',to:id,candidate:e.candidate}));
+  pc.ontrack=e=>{const a=new Audio();a.autoplay=true;a.srcObject=e.streams[0];a.dataset.peer=id;a.play().catch(()=>{});};
+  const offer=await pc.createOffer(); await pc.setLocalDescription(offer); state.socket.send(JSON.stringify({type:'voice:offer',to:id,offer}));
+}
+
+setInterval(update,50); connect(); render();
