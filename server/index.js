@@ -4,10 +4,13 @@ import { WebSocketServer } from 'ws';
 
 const PORT=Number(process.env.PORT||3001);
 const app=express();
-app.use(express.json({limit:'8mb'}));
+// Base64 increases a 5 MB file to roughly 6.7 MB, plus JSON overhead.
+// Keep the HTTP body limit comfortably above that so compressed 5 MB videos can be published.
+app.use(express.json({limit:'12mb'}));
 app.use((req,res,next)=>{res.setHeader('Access-Control-Allow-Origin','*');res.setHeader('Access-Control-Allow-Methods','GET,POST,DELETE,OPTIONS');res.setHeader('Access-Control-Allow-Headers','Content-Type');if(req.method==='OPTIONS')return res.sendStatus(204);next()});
 const players=new Map(),media=new Map();
 const CHAT_RADIUS=1500;
+const MAX_MEDIA_SRC=11*1024*1024;
 const cleanName=v=>String(v||'Player').replace(/[^\p{L}\p{N}_ -]/gu,'').slice(0,18).trim()||'Player';
 const nameKey=v=>cleanName(v).toLocaleLowerCase();
 const nameTaken=(name,exceptId=null)=>{const key=nameKey(name);for(const [id,p] of players)if(id!==exceptId&&nameKey(p.name)===key)return true;return false};
@@ -18,36 +21,21 @@ const broadcast=(p,except=null)=>{const s=JSON.stringify(p);for(const [id,c] of 
 const broadcastMedia=p=>{const s=JSON.stringify(p);for(const c of players.values())if(c.ws.readyState===1)c.ws.send(s)};
 const notify=(ws,text)=>send(ws,{type:'chat',name:'Serveur',text,at:Date.now(),player:{id:'__server__',name:'Serveur',x:0,y:0}});
 
-function youtubeId(value){
-  const raw=String(value||'').trim();
-  if(/^[\w-]{6,}$/.test(raw))return raw;
-  try{
-    const u=new URL(raw);
-    if(u.hostname==='youtu.be'||u.hostname.endsWith('.youtu.be'))return u.pathname.split('/').filter(Boolean)[0]||null;
-    if(u.hostname.includes('youtube.com')){
-      if(u.searchParams.get('v'))return u.searchParams.get('v');
-      const parts=u.pathname.split('/').filter(Boolean);
-      if(['shorts','embed','live'].includes(parts[0]))return parts[1]||null;
-    }
-  }catch{}
-  return null;
-}
-
 app.get('/health',(_,res)=>res.json({ok:true,service:'proxy-chat',players:players.size,media:media.size}));
 app.get('/media',(_,res)=>res.json([...media.values()]));
 app.post('/media',(req,res)=>{
   try{
     const d=req.body||{};
-    if(!['image','video','youtube'].includes(d.type))return res.status(400).json({error:'Type de média invalide'});
-    let src=String(d.src||'').trim();
-    if(d.type==='youtube'){
-      src=youtubeId(src);
-      if(!src)return res.status(400).json({error:'Lien YouTube invalide'});
-    }else if(!src||src.length>7000000)return res.status(413).json({error:'Média trop volumineux'});
+    if(!['image','video'].includes(d.type))return res.status(400).json({error:'Type de média invalide'});
+    const src=String(d.src||'').trim();
+    if(!src)return res.status(400).json({error:'Média vide'});
+    if(src.length>MAX_MEDIA_SRC)return res.status(413).json({error:'Média trop volumineux après encodage'});
+    if(d.type==='image'&&!/^data:image\/(jpeg|png|webp|gif);base64,/i.test(src))return res.status(400).json({error:'Format image invalide'});
+    if(d.type==='video'&&!/^data:video\/(webm|mp4);base64,/i.test(src))return res.status(400).json({error:'Format vidéo invalide'});
     const item={
       id:String(d.id||crypto.randomUUID()),ownerId:String(d.ownerId||'anonymous'),ownerName:String(d.ownerName||'Player').slice(0,18),type:d.type,src,
       x:Math.max(0,Math.min(2400,Number(d.x)||0)),y:Math.max(0,Math.min(1500,Number(d.y)||0)),
-      width:Math.max(40,Math.min(1000,Number(d.width)||400)),height:Math.max(40,Math.min(800,Number(d.height)||225)),rotation:Number(d.rotation)||0,
+      width:Math.max(40,Math.min(1400,Number(d.width)||400)),height:Math.max(40,Math.min(1400,Number(d.height)||225)),rotation:Number(d.rotation)||0,
       autoplay:Boolean(d.autoplay),loop:Boolean(d.loop)
     };
     media.set(item.id,item);broadcastMedia({type:'media:published',media:item});res.json(item);
